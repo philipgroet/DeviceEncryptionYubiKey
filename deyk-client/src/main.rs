@@ -44,12 +44,16 @@ enum Commands {
         #[arg(long)]
         dek: String,
 
+        /// The server's transport public key (Hex)
+        #[arg(long)]
+        k_s_pub: Option<String>,
+
         /// The nonce from the server (Hex)
         #[arg(long)]
         nonce: String,
 
         /// Path to the client configuration file
-        #[arg(long, default_value = "deyk_client_config.json")]
+        #[arg(long, default_value = "deyk_config.json")]
         config: String,
     },
 }
@@ -116,8 +120,14 @@ fn main() -> Result<()> {
             println!("DEK unwrapped successfully!");
             println!("{}", hex::encode(dek));
         }
-        Commands::Wrap { dek, nonce, config } => {
+        Commands::Wrap { dek, k_s_pub, nonce, config } => {
             let mut client_config = ClientConfig::load(&config)?;
+            
+            // Use k_s_pub from CLI if provided, otherwise use from config
+            if let Some(pub_key) = k_s_pub {
+                client_config.k_s_pub = Some(pub_key);
+                client_config.save(&config).context("Failed to save client configuration")?;
+            }
 
             let k_s_pub_hex = client_config.k_s_pub.as_ref()
                 .context("Server public key (k_s_pub) not set. Please provide it using --k-s-pub <HEX>")?;
