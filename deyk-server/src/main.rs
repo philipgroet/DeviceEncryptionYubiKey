@@ -6,7 +6,7 @@ use config::{ServerStateJson, ServerState};
 use anyhow::{Result, Context};
 use serde_json::json;
 use p256::SecretKey;
-use rand::rngs::OsRng;
+use rand::{rngs::OsRng, RngCore};
 use p256::elliptic_curve::sec1::{ToEncodedPoint, FromEncodedPoint};
 
 #[derive(Parser)]
@@ -27,23 +27,37 @@ enum Commands {
 
         /// Set or update the YubiKey ECDH public key (Hex)
         #[arg(long)]
-        set_yubikey_pub: Option<String>,
+        set_yubikey_ecdh_pub: Option<String>,
+
+        /// Set or update the YubiKey Sign public key (Hex)
+        #[arg(long)]
+        set_yubikey_sign_pub: Option<String>,
     },
-    /// Placeholder for next stages (e.g. Phase D: Unlock)
+    /// Phase D: Server Verification and Unlock
     Unlock {
+        /// Path to the JSON configuration file
+        #[arg(long, default_value = "deyk_config.json")]
+        config: String,
+
+        /// The encrypted payload from the client (Hex)
+        #[arg(long)]
+        payload: String,
+    },
+    /// Get a fresh nonce from the server
+    GetNonce {
         /// Path to the JSON configuration file
         #[arg(long, default_value = "deyk_config.json")]
         config: String,
     },
 }
 
-fn validate_yubikey_pub_length(hex_str: &str) -> Result<()> {
+fn validate_yubikey_pub_length(hex_str: &str, name: &str) -> Result<()> {
     // Uncompressed P-256 is 65 bytes (130 hex chars), compressed is 33 bytes (66 hex chars)
     let len = hex_str.len();
     if len == 130 || len == 66 {
         Ok(())
     } else {
-        anyhow::bail!("Invalid YubiKey public key length: {} (expected 66 or 130 hex characters)", len)
+        anyhow::bail!("Invalid {} length: {} (expected 66 or 130 hex characters)", name, len)
     }
 }
 
@@ -51,17 +65,24 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Setup { config, set_yubikey_pub } => {
+        Commands::Setup { config, set_yubikey_ecdh_pub, set_yubikey_sign_pub } => {
             let mut json_state = ServerStateJson::load(&config)?;
 
-            if let Some(pub_key) = set_yubikey_pub {
-                validate_yubikey_pub_length(&pub_key)?;
-                json_state.yubikey_ecdh_pub = Some(pub_key);
+            if let Some(pub_key) = set_yubikey_ecdh_pub {
+                validate_yubikey_pub_length(&pub_key, "YubiKey ECDH public key")?;
+                json_state.k_yk_ecdh_pub = Some(pub_key);
             }
 
-            // Ensure YubiKey pub is available
-            let yk_pub_hex = json_state.yubikey_ecdh_pub.as_ref()
-                .context("YubiKey public key not set. Please provide it using --set-yubikey-pub <HEX>")?;
+            if let Some(sign_key) = set_yubikey_sign_pub {
+                validate_yubikey_pub_length(&sign_key, "YubiKey sign public key")?;
+                json_state.yubikey_sign_pub = Some(sign_key);
+            }
+
+            // Ensure YubiKey pubs are available
+            let yk_pub_hex = json_state.k_yk_ecdh_pub.as_ref()
+                .context("YubiKey ECDH public key not set. Please provide it using --set-yubikey-ecdh-pub <HEX>")?;
+            let _yk_sign_hex = json_state.yubikey_sign_pub.as_ref()
+                .context("YubiKey sign public key not set. Please provide it using --set-yubikey-sign-pub <HEX>")?;
 
             // Ensure server keypair exists
             if json_state.k_s_priv.is_none() {
@@ -109,14 +130,47 @@ fn main() -> Result<()> {
 
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        Commands::Unlock { config } => {
-            // For next stages, we need a fully populated ServerState.
-            // If any fields are missing, ServerState::load will return an error from parse.
-            let _state = ServerState::load(&config).map_err(|e| {
+        Commands::Unlock { config, payload } => {
+            let state = ServerState::load(&config).map_err(|e| {
                 anyhow::anyhow!("Configuration is incomplete: {}. Please run the 'setup' command first.", e)
             })?;
 
-            println!("ServerState loaded successfully. Proceeding with Unlock placeholder...");
+            let nonce = state.nonce.as_ref()
+                .context("No active nonce found. Please run 'get-nonce' command first.")?;
+
+            let dek = crypto::run_phase_d(
+                &state.k_s_priv,
+                &state.k_yk_ecdh_pub,
+                &state.k_yk_sign_pub,
+                nonce,
+                &payload
+            )?;
+
+            let result = json!({
+                "status": "success",
+                "dek": hex::encode(dek)
+            });
+
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        Commands::GetNonce { config } => {
+            let mut json_state = ServerStateJson::load(&config)?;
+            
+            // Generate a secure 16-byte nonce
+            let mut nonce_bytes = [0u8; 16];
+            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+            let nonce_hex = hex::encode(nonce_bytes);
+
+            // Update and save
+            json_state.nonce = Some(nonce_hex.clone());
+            json_state.save(&config).context("Failed to save configuration with nonce")?;
+
+            let result = json!({
+                "status": "success",
+                "nonce": nonce_hex
+            });
+
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
     }
 
