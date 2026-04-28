@@ -131,18 +131,21 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Unlock { config, payload } => {
-            let state = ServerState::load(&config).map_err(|e| {
-                anyhow::anyhow!("Configuration is incomplete: {}. Please run the 'setup' command first.", e)
-            })?;
+            let mut json_state = ServerStateJson::load(&config)?;
+            
+            // Extract nonce and clear it immediately in the persistent state
+            let nonce_hex = json_state.nonce.take().context("No active nonce found. Please run 'get-nonce' command first.")?;
+            json_state.save(&config).context("Failed to clear nonce in configuration")?;
 
-            let nonce = state.nonce.as_ref()
-                .context("No active nonce found. Please run 'get-nonce' command first.")?;
+            // Now parse the full state for logic
+            let state = ServerState::parse(json_state)?;
+            let nonce_bytes = hex::decode(nonce_hex)?;
 
             let dek = crypto::run_phase_d(
                 &state.k_s_priv,
                 &state.k_yk_ecdh_pub,
                 &state.k_yk_sign_pub,
-                nonce,
+                &nonce_bytes,
                 &payload
             )?;
 

@@ -97,7 +97,7 @@ pub fn run_phase_d(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use p256::elliptic_curve::sec1::FromEncodedPoint;
+    use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
     use rand::rngs::OsRng;
     use p256::ecdsa::{SigningKey, signature::Signer};
 
@@ -108,6 +108,13 @@ mod tests {
         let yk_ecdh_pub = yk_ecdh_priv.public_key();
         let yk_sign_priv = SigningKey::random(&mut OsRng);
         let yk_sign_pub = PublicKey::from(yk_sign_priv.verifying_key());
+
+        println!("--- MOCK YUBIKEY KEYS ---");
+        println!("ECDH PRIV: {}", hex::encode(yk_ecdh_priv.to_bytes()));
+        println!("ECDH PUB:  {}", hex::encode(yk_ecdh_pub.to_encoded_point(false).as_bytes()));
+        println!("SIGN PRIV: {}", hex::encode(yk_sign_priv.to_bytes()));
+        println!("SIGN PUB:  {}", hex::encode(yk_sign_pub.to_encoded_point(false).as_bytes()));
+        println!("-------------------------");
 
         let s_priv = SecretKey::random(&mut OsRng);
 
