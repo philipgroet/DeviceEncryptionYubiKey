@@ -1,9 +1,10 @@
-use anyhow::{Result, Context};
+use anyhow::Result;
 use p256::PublicKey;
 use hkdf::Hkdf;
 use sha2::Sha256;
-use aes_siv::{aead::{Aead, KeyInit}, Aes256SivAead};
+use aes_siv::{aead::{Aead, KeyInit, Payload}, Aes256SivAead};
 use crate::yubikey::YubiKeyToken;
+use rand::{RngCore};
 
 pub fn unwrap_dek(
     token: &mut dyn YubiKeyToken,
@@ -40,34 +41,39 @@ pub fn wrap_transport(
     token: &mut dyn YubiKeyToken,
     dek: &[u8; 32],
     k_s_pub: &PublicKey,
-    nonce: &[u8],
-) -> Result<Vec<u8>> {
+    server_nonce: &[u8],
+) -> Result<(Vec<u8>, String)> {
     // 1. Compute transport shared secret
     let shared_secret = token.compute_ecdh(k_s_pub)?;
 
+    println!("Computed shared secret");
+
+    // Generate a secure 16-byte nonce
+    let mut client_nonce_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut client_nonce_bytes);
+    let client_nonce_hex = hex::encode(client_nonce_bytes);
+    println!("Client nonce: {}", client_nonce_hex);
+
     // 2. Derive transport wrapping key via HKDF
-    let hk = Hkdf::<Sha256>::new(Some(nonce), &shared_secret);
+    let hk = Hkdf::<Sha256>::new(Some(client_nonce_bytes.as_slice()), &shared_secret);
     let mut k_transport = [0u8; 64];
     hk.expand(b"transport-wrapping-key", &mut k_transport)
         .map_err(|_| anyhow::anyhow!("HKDF expansion failed"))?;
 
-    // 3. Sign the nonce
-    let sig = token.sign(nonce)?;
-
-    // 4. Construct plaintext payload: DEK || Signature
-    let mut payload_plain = Vec::with_capacity(32 + sig.len());
-    payload_plain.extend_from_slice(dek);
-    payload_plain.extend_from_slice(&sig);
+    let unwrapped_payload = Payload {
+        msg: dek,
+        aad: server_nonce,
+    };
 
     // 5. Encrypt using AES-SIV
     let cipher = Aes256SivAead::new_from_slice(&k_transport)
         .map_err(|_| anyhow::anyhow!("Failed to initialize AES-SIV"))?;
     
     // AES-SIV with Nonce as AAD
-    let payload_enc = cipher.encrypt(nonce.into(), payload_plain.as_slice())
+    let payload_enc = cipher.encrypt(&client_nonce_bytes.into(), unwrapped_payload)
         .map_err(|_| anyhow::anyhow!("Transport wrapping failed"))?;
 
-    Ok(payload_enc)
+    Ok((payload_enc, client_nonce_hex))
 }
 
 #[cfg(test)]
@@ -121,26 +127,25 @@ mod tests {
         let k_s_pub = s_priv.public_key();
 
         let dek = [7u8; 32];
-        let nonce = [42u8; 16];
+        let server_nonce = [42u8; 16];
 
         // --- Execute Phase C ---
-        let payload_enc = wrap_transport(&mut mock_token, &dek, &k_s_pub, &nonce).expect("Wrap should succeed");
+        let (payload_enc, client_nonce_hex) = wrap_transport(&mut mock_token, &dek, &k_s_pub, &server_nonce).expect("Wrap should succeed");
+        let client_nonce_bytes = hex::decode(client_nonce_hex).unwrap();
 
         // --- Verify (Simulating Server-Side Phase D) ---
         let shared_secret_transport = p256::ecdh::diffie_hellman(s_priv.to_nonzero_scalar(), mock_token.ecdh_priv.public_key().as_affine());
         let mut k_transport = [0u8; 64];
-        Hkdf::<Sha256>::new(Some(&nonce), &shared_secret_transport.raw_secret_bytes())
+        Hkdf::<Sha256>::new(Some(&client_nonce_bytes), &shared_secret_transport.raw_secret_bytes())
             .expand(b"transport-wrapping-key", &mut k_transport).unwrap();
         
         let cipher = Aes256SivAead::new_from_slice(&k_transport).unwrap();
-        let decrypted = cipher.decrypt((&nonce).into(), payload_enc.as_slice()).unwrap();
+        let unwrapped_payload = aes_siv::aead::Payload {
+            msg: payload_enc.as_slice(),
+            aad: &server_nonce,
+        };
+        let decrypted = cipher.decrypt(client_nonce_bytes.as_slice().into(), unwrapped_payload).unwrap();
 
         assert_eq!(&decrypted[..32], &dek);
-        
-        // Verify signature (MockToken uses ECDSA DER)
-        use p256::ecdsa::{VerifyingKey, signature::Verifier};
-        let verify_key = VerifyingKey::from(&yk_sign_priv.public_key());
-        let sig = p256::ecdsa::Signature::from_der(&decrypted[32..]).unwrap();
-        verify_key.verify(&nonce, &sig).expect("Signature verification failed");
     }
 }

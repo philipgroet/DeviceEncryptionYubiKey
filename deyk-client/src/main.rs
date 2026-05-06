@@ -16,6 +16,10 @@ use yubikey::YubiKeyToken;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    /// YubiKey PIN (required for hardware token)
+    #[arg(long, global = true)]
+    pin: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -80,7 +84,7 @@ impl ClientConfig {
     }
 }
 
-fn get_token() -> Result<Box<dyn YubiKeyToken>> {
+fn get_token(pin: Option<String>) -> Result<Box<dyn YubiKeyToken>> {
     // Check for mock environment variables
     if let (Ok(ecdh_hex), Ok(sign_hex)) = (std::env::var("DEYK_MOCK_ECDH_PRIV"), std::env::var("DEYK_MOCK_SIGN_PRIV")) {
         println!("Using Mock YubiKey...");
@@ -93,12 +97,14 @@ fn get_token() -> Result<Box<dyn YubiKeyToken>> {
         Ok(Box::new(yubikey::MockToken::new(ecdh_priv, sign_priv)))
     } else {
         println!("Connecting to Hardware YubiKey...");
-        Ok(Box::new(yubikey::HardwareToken::connect()?))
+        let pin = pin.context("Hardware YubiKey requires --pin <PIN>")?;
+        Ok(Box::new(yubikey::HardwareToken::connect(pin)?))
     }
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let pin = cli.pin.clone();
 
     match cli.command {
         Commands::Unwrap { c_yk, k_e_pub, set_k_s_pub, config } => {
@@ -114,7 +120,7 @@ fn main() -> Result<()> {
             let k_e_pub_point = EncodedPoint::from_bytes(&k_e_pub_bytes).map_err(|_| anyhow::anyhow!("Invalid k_e_pub encoded point"))?;
             let k_e_pub = PublicKey::from_encoded_point(&k_e_pub_point).into_option().context("Invalid k_e_pub point")?;
 
-            let mut token = get_token()?;
+            let mut token = get_token(pin)?;
             let dek = crypto::unwrap_dek(token.as_mut(), &c_yk_bytes, &k_e_pub)?;
 
             println!("DEK unwrapped successfully!");
@@ -145,11 +151,12 @@ fn main() -> Result<()> {
 
             let nonce_bytes = hex::decode(nonce).context("Invalid nonce hex")?;
 
-            let mut token = get_token()?;
-            let payload_enc = crypto::wrap_transport(token.as_mut(), &dek_array, &k_s_pub, &nonce_bytes)?;
+            let mut token = get_token(pin)?;
+            let (payload_enc, client_nonce) = crypto::wrap_transport(token.as_mut(), &dek_array, &k_s_pub, &nonce_bytes)?;
 
             println!("Transport wrap successful!");
-            println!("{}", hex::encode(payload_enc));
+            println!("Payload Hex: {}", hex::encode(payload_enc));
+            println!("Client Nonce Hex: {}", client_nonce);
         }
     }
 

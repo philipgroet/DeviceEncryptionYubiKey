@@ -42,6 +42,10 @@ enum Commands {
         /// The encrypted payload from the client (Hex)
         #[arg(long)]
         payload: String,
+
+        /// The client nonce generated for this payload(Hex)
+        #[arg(long)]
+        client_nonce: String,
     },
     /// Get a fresh nonce from the server
     GetNonce {
@@ -75,17 +79,18 @@ fn main() -> Result<()> {
 
             if let Some(sign_key) = set_yubikey_sign_pub {
                 validate_yubikey_pub_length(&sign_key, "YubiKey sign public key")?;
-                json_state.yubikey_sign_pub = Some(sign_key);
+                json_state.k_yk_sign_pub = Some(sign_key);
             }
 
             // Ensure YubiKey pubs are available
             let yk_pub_hex = json_state.k_yk_ecdh_pub.as_ref()
                 .context("YubiKey ECDH public key not set. Please provide it using --set-yubikey-ecdh-pub <HEX>")?;
-            let _yk_sign_hex = json_state.yubikey_sign_pub.as_ref()
+            let _yk_sign_hex = json_state.k_yk_sign_pub.as_ref()
                 .context("YubiKey sign public key not set. Please provide it using --set-yubikey-sign-pub <HEX>")?;
 
             // Ensure server keypair exists
             if json_state.k_s_priv.is_none() {
+                println!("Generating server keypair...");
                 let sk = SecretKey::random(&mut OsRng);
                 let pk = sk.public_key();
                 json_state.k_s_priv = Some(hex::encode(sk.to_bytes()));
@@ -130,22 +135,24 @@ fn main() -> Result<()> {
 
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        Commands::Unlock { config, payload } => {
-            let mut json_state = ServerStateJson::load(&config)?;
+        Commands::Unlock { config, payload, client_nonce } => {
+            let json_state = ServerStateJson::load(&config)?;
             
             // Extract nonce and clear it immediately in the persistent state
-            let nonce_hex = json_state.nonce.take().context("No active nonce found. Please run 'get-nonce' command first.")?;
+            let server_nonce_hex = json_state.server_nonce.clone().context("No active nonce found. Please run 'get-nonce' command first.")?;
             json_state.save(&config).context("Failed to clear nonce in configuration")?;
 
             // Now parse the full state for logic
             let state = ServerState::parse(json_state)?;
-            let nonce_bytes = hex::decode(nonce_hex)?;
+            let server_nonce_bytes = hex::decode(server_nonce_hex)?;
+
+            let client_nonce_bytes = hex::decode(client_nonce)?;
 
             let dek = crypto::run_phase_d(
                 &state.k_s_priv,
                 &state.k_yk_ecdh_pub,
-                &state.k_yk_sign_pub,
-                &nonce_bytes,
+                &server_nonce_bytes,
+                &client_nonce_bytes,
                 &payload
             )?;
 
@@ -165,12 +172,12 @@ fn main() -> Result<()> {
             let nonce_hex = hex::encode(nonce_bytes);
 
             // Update and save
-            json_state.nonce = Some(nonce_hex.clone());
+            json_state.server_nonce = Some(nonce_hex.clone());
             json_state.save(&config).context("Failed to save configuration with nonce")?;
 
             let result = json!({
                 "status": "success",
-                "nonce": nonce_hex
+                "server_nonce": nonce_hex
             });
 
             println!("{}", serde_json::to_string_pretty(&result)?);
