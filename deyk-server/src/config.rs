@@ -33,6 +33,47 @@ impl ServerStateJson {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_nonce_clearing() {
+        let mut state = ServerStateJson::default();
+        state.server_nonce = Some("test-nonce".to_string());
+        
+        // Take the nonce
+        let taken = state.server_nonce.take();
+        assert_eq!(taken, Some("test-nonce".to_string()));
+        assert!(state.server_nonce.is_none());
+    }
+
+    #[test]
+    fn test_persistence_clears_nonce() -> Result<()> {
+        let file = NamedTempFile::new()?;
+        let path = file.path().to_path_buf();
+
+        let mut state = ServerStateJson::default();
+        state.server_nonce = Some("secret-nonce".to_string());
+        state.save(&path)?;
+
+        // Load and check it's there
+        let mut loaded = ServerStateJson::load(&path)?;
+        assert_eq!(loaded.server_nonce, Some("secret-nonce".to_string()));
+
+        // Clear it
+        loaded.server_nonce.take();
+        loaded.save(&path)?;
+
+        // Reload and check it's gone
+        let reloaded = ServerStateJson::load(&path)?;
+        assert!(reloaded.server_nonce.is_none());
+
+        Ok(())
+    }
+}
+
 pub struct ServerState {
     pub k_yk_ecdh_pub: PublicKey,
     pub k_s_priv: SecretKey,

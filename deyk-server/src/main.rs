@@ -136,10 +136,10 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Commands::Unlock { config, payload, client_nonce } => {
-            let json_state = ServerStateJson::load(&config)?;
+            let mut json_state = ServerStateJson::load(&config)?;
             
             // Extract nonce and clear it immediately in the persistent state
-            let server_nonce_hex = json_state.server_nonce.clone().context("No active nonce found. Please run 'get-nonce' command first.")?;
+            let server_nonce_hex = json_state.server_nonce.take().context("No active nonce found. Please run 'get-nonce' command first.")?;
             json_state.save(&config).context("Failed to clear nonce in configuration")?;
 
             // Now parse the full state for logic
