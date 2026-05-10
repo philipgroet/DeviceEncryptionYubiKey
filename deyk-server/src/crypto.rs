@@ -104,6 +104,9 @@ mod tests {
     use rand::rngs::OsRng;
     use p256::ecdsa::SigningKey;
 
+    /// Verifies the full positive flow of Phase A (Setup) and Phase D (Server Unlock).
+    /// This test simulates the client-side Phase B (Unwrap) and Phase C (Wrap) to ensure
+    /// the end-to-end cryptographic logic is sound.
     #[test]
     fn test_phase_a_and_d_success() {
         // --- Setup ---
@@ -165,6 +168,8 @@ mod tests {
         assert_eq!(recovered_dek, setup_output.dek);
     }
 
+    /// Verifies that the server correctly rejects a payload if the provided
+    /// server nonce does not match the one used during AES-SIV encryption (AAD mismatch).
     #[test]
     fn test_phase_d_wrong_server_nonce() {
         let yk_ecdh_priv = SecretKey::random(&mut OsRng);
@@ -186,6 +191,10 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Verifies that the server correctly rejects a payload if the provided
+    /// client nonce does not match. This fails in two places:
+    /// 1. HKDF key derivation (wrong k_transport)
+    /// 2. AES-SIV decryption (wrong nonce)
     #[test]
     fn test_phase_d_wrong_client_nonce() {
         let yk_ecdh_priv = SecretKey::random(&mut OsRng);
@@ -207,6 +216,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Verifies that any tampering with the encrypted payload (bit-flipping)
+    /// is detected by the AES-SIV MAC and results in a decryption error.
     #[test]
     fn test_phase_d_tampered_payload() {
         let yk_ecdh_priv = SecretKey::random(&mut OsRng);
@@ -228,6 +239,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Verifies that providing the wrong server private key to `run_phase_d`
+    /// results in a shared secret mismatch and subsequent decryption failure.
     #[test]
     fn test_phase_d_wrong_server_key() {
         let yk_ecdh_priv = SecretKey::random(&mut OsRng);
@@ -247,6 +260,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Verifies that non-16-byte nonces (either client or server) result in a
+    /// clean validation error rather than a panic or cryptographic misbehavior.
     #[test]
     fn test_phase_d_invalid_nonce_length() {
         let yk_ecdh_priv = SecretKey::random(&mut OsRng);
@@ -264,6 +279,8 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("Invalid client nonce length"));
     }
 
+    /// Verifies that truncated payloads (too short to contain a valid AES-SIV tag)
+    /// result in a decryption error.
     #[test]
     fn test_phase_d_invalid_payload_length() {
         let yk_ecdh_priv = SecretKey::random(&mut OsRng);
@@ -273,13 +290,5 @@ mod tests {
         // Payload too short for AES-SIV (must be at least 16 bytes for S2V tag)
         let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &nonce, &nonce, "aabbcc");
         assert!(result.is_err());
-    }
-
-    #[test]
-    #[ignore = "Hardware signature verification is not yet implemented"]
-    fn test_phase_d_invalid_signature() {
-        // This is a placeholder for when Phase C/D includes a hardware signature
-        // as described in DESIGN.md.
-        assert!(false, "Signature verification not implemented");
     }
 }

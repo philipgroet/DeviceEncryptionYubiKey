@@ -85,6 +85,8 @@ mod tests {
     use rand::rngs::OsRng;
     use rand::RngCore;
 
+    /// Verifies that the client can successfully unwrap a DEK that was
+    /// encrypted during server-side Phase A, provided the correct YubiKey and ephemeral key.
     #[test]
     fn test_unwrap_dek_success() {
         // --- Setup ---
@@ -117,6 +119,8 @@ mod tests {
         assert_eq!(unwrapped_dek, expected_dek);
     }
 
+    /// Verifies that the client can successfully wrap a DEK for transport
+    /// to the server (Phase C). A simulated server-side check is performed to verify integrity.
     #[test]
     fn test_wrap_transport_success() {
         // --- Setup ---
@@ -150,6 +154,7 @@ mod tests {
         assert_eq!(&decrypted[..32], &dek);
     }
 
+    /// Verifies that the client correctly detects tampering in the offline-wrapped DEK (`c_yk`).
     #[test]
     fn test_unwrap_dek_tampered_c_yk() {
         let yk_ecdh_priv = SecretKey::random(&mut OsRng);
@@ -171,6 +176,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Verifies that providing the wrong ephemeral public key (`k_e_pub`) to
+    /// `unwrap_dek` results in a shared secret mismatch and decryption failure.
     #[test]
     fn test_unwrap_dek_wrong_k_e_pub() {
         let yk_ecdh_priv = SecretKey::random(&mut OsRng);
@@ -190,6 +197,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Verifies that a truncated `c_yk` (shorter than the required AES-SIV tag)
+    /// results in a clean error rather than a panic.
     #[test]
     fn test_unwrap_dek_invalid_cyk_length() {
         let mut mock_token = MockToken::new(SecretKey::random(&mut OsRng), SecretKey::random(&mut OsRng));
@@ -200,6 +209,8 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Verifies that providing a server nonce of incorrect length to
+    /// `wrap_transport` results in a validation error.
     #[test]
     fn test_wrap_transport_invalid_nonce_length() {
         let mut mock_token = MockToken::new(SecretKey::random(&mut OsRng), SecretKey::random(&mut OsRng));

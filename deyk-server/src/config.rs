@@ -38,6 +38,8 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
+    /// Verifies that the server nonce can be successfully cleared from memory
+    /// using the `Option::take()` method, ensuring it's no longer available for re-use.
     #[test]
     fn test_nonce_clearing() {
         let mut state = ServerStateJson::default();
@@ -49,6 +51,8 @@ mod tests {
         assert!(state.server_nonce.is_none());
     }
 
+    /// Verifies that clearing the nonce in the server state and saving it to disk
+    /// correctly persists the "cleared" state (nonce should be None upon reload).
     #[test]
     fn test_persistence_clears_nonce() -> Result<()> {
         let file = NamedTempFile::new()?;
