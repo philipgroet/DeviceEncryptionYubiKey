@@ -58,6 +58,14 @@ pub fn run_phase_d(
     client_nonce: &[u8],
     payload_hex: &str,
 ) -> Result<[u8; 32]> {
+    // 0. Validate nonce lengths
+    if server_nonce.len() != 16 {
+        anyhow::bail!("Invalid server nonce length: {} (expected 16)", server_nonce.len());
+    }
+    if client_nonce.len() != 16 {
+        anyhow::bail!("Invalid client nonce length: {} (expected 16)", client_nonce.len());
+    }
+
     // 1. Compute transport shared secret
     let shared_secret = p256::ecdh::diffie_hellman(k_s_priv.to_nonzero_scalar(), k_yk_ecdh_pub.as_affine());
     let shared_secret_bytes = shared_secret.raw_secret_bytes();
@@ -79,6 +87,10 @@ pub fn run_phase_d(
     };
     let dek = cipher.decrypt(client_nonce.into(), cipher_payload)
         .map_err(|_| anyhow::anyhow!("Decryption failed - possibly invalid nonce or tampered payload"))?;
+
+    if dek.len() != 32 {
+        anyhow::bail!("Decrypted DEK has invalid length: {} (expected 32)", dek.len());
+    }
 
     let mut dek_array = [0u8; 32];
     dek_array.copy_from_slice(dek.as_slice());    
@@ -151,5 +163,123 @@ mod tests {
         ).expect("Phase D failed");
 
         assert_eq!(recovered_dek, setup_output.dek);
+    }
+
+    #[test]
+    fn test_phase_d_wrong_server_nonce() {
+        let yk_ecdh_priv = SecretKey::random(&mut OsRng);
+        let s_priv = SecretKey::random(&mut OsRng);
+        let server_nonce_correct = [1u8; 16];
+        let server_nonce_wrong = [2u8; 16];
+        let client_nonce = [0u8; 16];
+
+        // Wrap with correct server nonce
+        let shared_secret_transport = p256::ecdh::diffie_hellman(yk_ecdh_priv.to_nonzero_scalar(), s_priv.public_key().as_affine());
+        let mut k_transport = [0u8; 64];
+        Hkdf::<Sha256>::new(Some(&client_nonce), &shared_secret_transport.raw_secret_bytes())
+            .expand(b"transport-wrapping-key", &mut k_transport).unwrap();
+        let cipher = Aes256SivAead::new_from_slice(&k_transport).unwrap();
+        let payload_enc = cipher.encrypt((&client_nonce).into(), Payload { msg: &[7u8; 32], aad: &server_nonce_correct }).unwrap();
+
+        // Attempt D with wrong server nonce
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce_wrong, &client_nonce, &hex::encode(payload_enc));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_phase_d_wrong_client_nonce() {
+        let yk_ecdh_priv = SecretKey::random(&mut OsRng);
+        let s_priv = SecretKey::random(&mut OsRng);
+        let server_nonce = [1u8; 16];
+        let client_nonce_correct = [10u8; 16];
+        let client_nonce_wrong = [20u8; 16];
+
+        // Wrap with correct client nonce
+        let shared_secret_transport = p256::ecdh::diffie_hellman(yk_ecdh_priv.to_nonzero_scalar(), s_priv.public_key().as_affine());
+        let mut k_transport = [0u8; 64];
+        Hkdf::<Sha256>::new(Some(&client_nonce_correct), &shared_secret_transport.raw_secret_bytes())
+            .expand(b"transport-wrapping-key", &mut k_transport).unwrap();
+        let cipher = Aes256SivAead::new_from_slice(&k_transport).unwrap();
+        let payload_enc = cipher.encrypt((&client_nonce_correct).into(), Payload { msg: &[7u8; 32], aad: &server_nonce }).unwrap();
+
+        // Attempt D with wrong client nonce
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce_wrong, &hex::encode(payload_enc));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_phase_d_tampered_payload() {
+        let yk_ecdh_priv = SecretKey::random(&mut OsRng);
+        let s_priv = SecretKey::random(&mut OsRng);
+        let server_nonce = [1u8; 16];
+        let client_nonce = [0u8; 16];
+
+        let shared_secret_transport = p256::ecdh::diffie_hellman(yk_ecdh_priv.to_nonzero_scalar(), s_priv.public_key().as_affine());
+        let mut k_transport = [0u8; 64];
+        Hkdf::<Sha256>::new(Some(&client_nonce), &shared_secret_transport.raw_secret_bytes())
+            .expand(b"transport-wrapping-key", &mut k_transport).unwrap();
+        let cipher = Aes256SivAead::new_from_slice(&k_transport).unwrap();
+        let mut payload_enc = cipher.encrypt((&client_nonce).into(), Payload { msg: &[7u8; 32], aad: &server_nonce }).unwrap();
+
+        // Tamper
+        payload_enc[0] ^= 0xFF;
+
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce, &hex::encode(payload_enc));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_phase_d_wrong_server_key() {
+        let yk_ecdh_priv = SecretKey::random(&mut OsRng);
+        let s_priv_correct = SecretKey::random(&mut OsRng);
+        let s_priv_wrong = SecretKey::random(&mut OsRng);
+        let server_nonce = [1u8; 16];
+        let client_nonce = [0u8; 16];
+
+        let shared_secret_transport = p256::ecdh::diffie_hellman(yk_ecdh_priv.to_nonzero_scalar(), s_priv_correct.public_key().as_affine());
+        let mut k_transport = [0u8; 64];
+        Hkdf::<Sha256>::new(Some(&client_nonce), &shared_secret_transport.raw_secret_bytes())
+            .expand(b"transport-wrapping-key", &mut k_transport).unwrap();
+        let cipher = Aes256SivAead::new_from_slice(&k_transport).unwrap();
+        let payload_enc = cipher.encrypt((&client_nonce).into(), Payload { msg: &[7u8; 32], aad: &server_nonce }).unwrap();
+
+        let result = run_phase_d(&s_priv_wrong, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce, &hex::encode(payload_enc));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_phase_d_invalid_nonce_length() {
+        let yk_ecdh_priv = SecretKey::random(&mut OsRng);
+        let s_priv = SecretKey::random(&mut OsRng);
+        let short_nonce = [1u8; 15];
+        let long_nonce = [1u8; 17];
+        let normal_nonce = [1u8; 16];
+
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &short_nonce, &normal_nonce, "deadbeef");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid server nonce length"));
+
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &normal_nonce, &long_nonce, "deadbeef");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid client nonce length"));
+    }
+
+    #[test]
+    fn test_phase_d_invalid_payload_length() {
+        let yk_ecdh_priv = SecretKey::random(&mut OsRng);
+        let s_priv = SecretKey::random(&mut OsRng);
+        let nonce = [1u8; 16];
+
+        // Payload too short for AES-SIV (must be at least 16 bytes for S2V tag)
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &nonce, &nonce, "aabbcc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[ignore = "Hardware signature verification is not yet implemented"]
+    fn test_phase_d_invalid_signature() {
+        // This is a placeholder for when Phase C/D includes a hardware signature
+        // as described in DESIGN.md.
+        assert!(false, "Signature verification not implemented");
     }
 }

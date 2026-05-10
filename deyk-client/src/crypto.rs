@@ -29,7 +29,7 @@ pub fn unwrap_dek(
         .map_err(|_| anyhow::anyhow!("DEK decryption failed. Incorrect YubiKey or tampered payload?"))?;
 
     if dek_bytes.len() != 32 {
-        anyhow::bail!("Decrypted DEK has invalid length: {}", dek_bytes.len());
+        anyhow::bail!("Decrypted DEK has invalid length: {} (expected 32)", dek_bytes.len());
     }
 
     let mut dek = [0u8; 32];
@@ -43,16 +43,17 @@ pub fn wrap_transport(
     k_s_pub: &PublicKey,
     server_nonce: &[u8],
 ) -> Result<(Vec<u8>, String)> {
+    if server_nonce.len() != 16 {
+        anyhow::bail!("Invalid server nonce length: {} (expected 16)", server_nonce.len());
+    }
+
     // 1. Compute transport shared secret
     let shared_secret = token.compute_ecdh(k_s_pub)?;
-
-    println!("Computed shared secret");
 
     // Generate a secure 16-byte nonce
     let mut client_nonce_bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut client_nonce_bytes);
     let client_nonce_hex = hex::encode(client_nonce_bytes);
-    println!("Client nonce: {}", client_nonce_hex);
 
     // 2. Derive transport wrapping key via HKDF
     let hk = Hkdf::<Sha256>::new(Some(client_nonce_bytes.as_slice()), &shared_secret);
@@ -147,5 +148,65 @@ mod tests {
         let decrypted = cipher.decrypt(client_nonce_bytes.as_slice().into(), unwrapped_payload).unwrap();
 
         assert_eq!(&decrypted[..32], &dek);
+    }
+
+    #[test]
+    fn test_unwrap_dek_tampered_c_yk() {
+        let yk_ecdh_priv = SecretKey::random(&mut OsRng);
+        let mut mock_token = MockToken::new(yk_ecdh_priv.clone(), SecretKey::random(&mut OsRng));
+        let e_priv = p256::ecdh::EphemeralSecret::random(&mut OsRng);
+        
+        let shared_secret = e_priv.diffie_hellman(&yk_ecdh_priv.public_key());
+        let mut k_offline = [0u8; 64];
+        Hkdf::<Sha256>::new(None, &shared_secret.raw_secret_bytes())
+            .expand(b"offline-wrapping-key", &mut k_offline).unwrap();
+        
+        let cipher = Aes256SivAead::new_from_slice(&k_offline).unwrap();
+        let mut c_yk = cipher.encrypt(&[0u8; 16].into(), [7u8; 32].as_slice()).unwrap();
+
+        // Tamper
+        c_yk[0] ^= 0xFF;
+
+        let result = unwrap_dek(&mut mock_token, &c_yk, &e_priv.public_key());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unwrap_dek_wrong_k_e_pub() {
+        let yk_ecdh_priv = SecretKey::random(&mut OsRng);
+        let mut mock_token = MockToken::new(yk_ecdh_priv.clone(), SecretKey::random(&mut OsRng));
+        let e_correct = p256::ecdh::EphemeralSecret::random(&mut OsRng);
+        let e_wrong = p256::ecdh::EphemeralSecret::random(&mut OsRng);
+        
+        let shared_secret = e_correct.diffie_hellman(&yk_ecdh_priv.public_key());
+        let mut k_offline = [0u8; 64];
+        Hkdf::<Sha256>::new(None, &shared_secret.raw_secret_bytes())
+            .expand(b"offline-wrapping-key", &mut k_offline).unwrap();
+        
+        let cipher = Aes256SivAead::new_from_slice(&k_offline).unwrap();
+        let c_yk = cipher.encrypt(&[0u8; 16].into(), [7u8; 32].as_slice()).unwrap();
+
+        let result = unwrap_dek(&mut mock_token, &c_yk, &e_wrong.public_key());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unwrap_dek_invalid_cyk_length() {
+        let mut mock_token = MockToken::new(SecretKey::random(&mut OsRng), SecretKey::random(&mut OsRng));
+        let k_e_pub = SecretKey::random(&mut OsRng).public_key();
+        
+        // c_yk too short for AES-SIV
+        let result = unwrap_dek(&mut mock_token, &[0u8; 15], &k_e_pub);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wrap_transport_invalid_nonce_length() {
+        let mut mock_token = MockToken::new(SecretKey::random(&mut OsRng), SecretKey::random(&mut OsRng));
+        let k_s_pub = SecretKey::random(&mut OsRng).public_key();
+        
+        let result = wrap_transport(&mut mock_token, &[0u8; 32], &k_s_pub, &[0u8; 15]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid server nonce length"));
     }
 }
