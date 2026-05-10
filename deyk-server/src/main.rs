@@ -129,6 +129,8 @@ fn main() -> Result<()> {
             let result = json!({
                 "status": "success",
                 "plaintext_dek": hex::encode(output.dek),
+                "c_yk": json_state.c_yk,
+                "k_e_pub": json_state.k_e_pub,
                 "config_file": config,
                 "server_pub_key": json_state.k_s_pub
             });
