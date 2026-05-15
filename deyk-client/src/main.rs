@@ -9,6 +9,7 @@ use std::path::Path;
 use p256::elliptic_curve::sec1::FromEncodedPoint;
 use p256::{EncodedPoint, PublicKey, SecretKey};
 use yubikey::YubiKeyToken;
+use ct_codecs::{Hex, Decoder, Encoder};
 
 #[derive(Parser)]
 #[command(name = "deyk-client")]
@@ -88,8 +89,8 @@ fn get_token(pin: Option<String>) -> Result<Box<dyn YubiKeyToken>> {
     // Check for mock environment variables
     if let (Ok(ecdh_hex), Ok(sign_hex)) = (std::env::var("DEYK_MOCK_ECDH_PRIV"), std::env::var("DEYK_MOCK_SIGN_PRIV")) {
         println!("Using Mock YubiKey...");
-        let ecdh_bytes = hex::decode(ecdh_hex).context("Invalid DEYK_MOCK_ECDH_PRIV hex")?;
-        let sign_bytes = hex::decode(sign_hex).context("Invalid DEYK_MOCK_SIGN_PRIV hex")?;
+        let ecdh_bytes = Hex::decode_to_vec(ecdh_hex, None).map_err(|_| anyhow::anyhow!("Invalid DEYK_MOCK_ECDH_PRIV hex"))?;
+        let sign_bytes = Hex::decode_to_vec(sign_hex, None).map_err(|_| anyhow::anyhow!("Invalid DEYK_MOCK_SIGN_PRIV hex"))?;
         
         let ecdh_priv = SecretKey::from_slice(&ecdh_bytes).map_err(|_| anyhow::anyhow!("Invalid mock ECDH private key"))?;
         let sign_priv = SecretKey::from_slice(&sign_bytes).map_err(|_| anyhow::anyhow!("Invalid mock sign private key"))?;
@@ -115,8 +116,8 @@ fn main() -> Result<()> {
                 client_config.save(&config).context("Failed to save client configuration")?;
             }
 
-            let c_yk_bytes = hex::decode(c_yk).context("Invalid c_yk hex")?;
-            let k_e_pub_bytes = hex::decode(k_e_pub).context("Invalid k_e_pub hex")?;
+            let c_yk_bytes = Hex::decode_to_vec(c_yk, None).map_err(|_| anyhow::anyhow!("Invalid c_yk hex"))?;
+            let k_e_pub_bytes = Hex::decode_to_vec(k_e_pub, None).map_err(|_| anyhow::anyhow!("Invalid k_e_pub hex"))?;
             let k_e_pub_point = EncodedPoint::from_bytes(&k_e_pub_bytes).map_err(|_| anyhow::anyhow!("Invalid k_e_pub encoded point"))?;
             let k_e_pub = PublicKey::from_encoded_point(&k_e_pub_point).into_option().context("Invalid k_e_pub point")?;
 
@@ -124,7 +125,7 @@ fn main() -> Result<()> {
             let dek = crypto::unwrap_dek(token.as_mut(), &c_yk_bytes, &k_e_pub)?;
 
             println!("DEK unwrapped successfully!");
-            println!("{}", hex::encode(dek));
+            println!("{}", Hex::encode_to_string(dek).unwrap());
         }
         Commands::Wrap { dek, k_s_pub, nonce, config } => {
             let mut client_config = ClientConfig::load(&config)?;
@@ -138,24 +139,24 @@ fn main() -> Result<()> {
             let k_s_pub_hex = client_config.k_s_pub.as_ref()
                 .context("Server public key (k_s_pub) not set. Please provide it using --k-s-pub <HEX>")?;
             
-            let dek_bytes = hex::decode(dek).context("Invalid DEK hex")?;
+            let dek_bytes = Hex::decode_to_vec(dek, None).map_err(|_| anyhow::anyhow!("Invalid DEK hex"))?;
             if dek_bytes.len() != 32 {
                 anyhow::bail!("Invalid DEK length: {} (expected 64 hex characters / 32 bytes)", dek_bytes.len() * 2);
             }
             let mut dek_array = [0u8; 32];
             dek_array.copy_from_slice(&dek_bytes);
 
-            let k_s_pub_bytes = hex::decode(k_s_pub_hex).context("Invalid k_s_pub hex")?;
+            let k_s_pub_bytes = Hex::decode_to_vec(k_s_pub_hex, None).map_err(|_| anyhow::anyhow!("Invalid k_s_pub hex"))?;
             let k_s_pub_point = EncodedPoint::from_bytes(&k_s_pub_bytes).map_err(|_| anyhow::anyhow!("Invalid k_s_pub encoded point"))?;
             let k_s_pub = PublicKey::from_encoded_point(&k_s_pub_point).into_option().context("Invalid k_s_pub point")?;
 
-            let nonce_bytes = hex::decode(nonce).context("Invalid nonce hex")?;
+            let nonce_bytes = Hex::decode_to_vec(nonce, None).map_err(|_| anyhow::anyhow!("Invalid nonce hex"))?;
 
             let mut token = get_token(pin)?;
             let (payload_enc, client_nonce) = crypto::wrap_transport(token.as_mut(), &dek_array, &k_s_pub, &nonce_bytes)?;
 
             println!("Transport wrap successful!");
-            println!("Payload Hex: {}", hex::encode(payload_enc));
+            println!("Payload Hex: {}", Hex::encode_to_string(payload_enc).unwrap());
             println!("Client Nonce Hex: {}", client_nonce);
         }
     }

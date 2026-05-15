@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::{Result, Context};
 use p256::{EncodedPoint, SecretKey, PublicKey};
 use p256::elliptic_curve::sec1::FromEncodedPoint;
+use ct_codecs::{Hex, Decoder};
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct ServerStateJson {
@@ -91,12 +92,14 @@ impl ServerState {
 
     pub fn parse(json: ServerStateJson) -> Result<Self> {
         let k_yk_ecdh_pub_hex = json.k_yk_ecdh_pub.context("Missing k_yk_ecdh_pub")?;
-        let yk_pub_bytes = hex::decode(k_yk_ecdh_pub_hex)?;
+        let yk_pub_bytes = Hex::decode_to_vec(&k_yk_ecdh_pub_hex, None)
+            .map_err(|_| anyhow::anyhow!("Invalid YubiKey ECDH public key hex"))?;
         let yk_pub_point = EncodedPoint::from_bytes(&yk_pub_bytes).map_err(|_| anyhow::anyhow!("Invalid YubiKey ECDH public key"))?;
         let k_yk_ecdh_pub = PublicKey::from_encoded_point(&yk_pub_point).into_option().context("Invalid YubiKey ECDH public key point")?;
 
         let k_s_priv_hex = json.k_s_priv.context("Missing k_s_priv")?;
-        let k_s_priv_bytes = hex::decode(k_s_priv_hex)?;
+        let k_s_priv_bytes = Hex::decode_to_vec(&k_s_priv_hex, None)
+            .map_err(|_| anyhow::anyhow!("Invalid server private key hex"))?;
         let k_s_priv = SecretKey::from_slice(&k_s_priv_bytes).map_err(|_| anyhow::anyhow!("Invalid server private key"))?;
 
         Ok(Self {

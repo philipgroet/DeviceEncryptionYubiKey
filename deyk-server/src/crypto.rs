@@ -8,7 +8,10 @@ use aes_siv::{
     aead::{Aead, KeyInit, Payload},
     Aes256SivAead
 };
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use ct_codecs::{Hex, Decoder, Encoder};
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PhaseAOutput {
     pub c_yk: Vec<u8>,
     pub k_e_pub: EncodedPoint,
@@ -25,17 +28,18 @@ pub fn generate_c_yk(k_yk_ecdh_pub: &PublicKey) -> Result<PhaseAOutput> {
     let k_e_pub = EncodedPoint::from(&e_priv.public_key());
 
     let shared_secret = e_priv.diffie_hellman(k_yk_ecdh_pub);
-    let shared_secret_bytes = shared_secret.raw_secret_bytes();
+    let shared_secret_bytes = Zeroizing::new(shared_secret.raw_secret_bytes().to_vec());
 
     // Step 4: Derive wrapping key via HKDF-SHA256
     // AES-SIV-256 (Aes256SivAead) requires a 64-byte key.
     let hk = Hkdf::<Sha256>::new(None, &shared_secret_bytes);
-    let mut k_offline = [0u8; 64];
-    hk.expand(b"offline-wrapping-key", &mut k_offline)
+    let mut k_offline_raw = [0u8; 64];
+    hk.expand(b"offline-wrapping-key", &mut k_offline_raw)
         .map_err(|_| anyhow::anyhow!("HKDF expansion failed"))?;
+    let k_offline = Zeroizing::new(k_offline_raw);
 
     // Step 5: Encrypt DEK using AES-SIV
-    let cipher = Aes256SivAead::new_from_slice(&k_offline)
+    let cipher = Aes256SivAead::new_from_slice(k_offline.as_slice())
         .map_err(|_| anyhow::anyhow!("Failed to initialize AES-SIV"))?;
     
     // AES-SIV is deterministic, but the AEAD trait expects a nonce.
@@ -68,32 +72,38 @@ pub fn run_phase_d(
 
     // 1. Compute transport shared secret
     let shared_secret = p256::ecdh::diffie_hellman(k_s_priv.to_nonzero_scalar(), k_yk_ecdh_pub.as_affine());
-    let shared_secret_bytes = shared_secret.raw_secret_bytes();
+    let shared_secret_bytes = Zeroizing::new(shared_secret.raw_secret_bytes().to_vec());
 
     // 2. Derive transport key via HKDF
     let hk = Hkdf::<Sha256>::new(Some(client_nonce), &shared_secret_bytes);
-    let mut k_transport = [0u8; 64];
-    hk.expand(b"transport-wrapping-key", &mut k_transport)
+    let mut k_transport_raw = [0u8; 64];
+    hk.expand(b"transport-wrapping-key", &mut k_transport_raw)
         .map_err(|_| anyhow::anyhow!("HKDF expansion failed"))?;
+    let k_transport = Zeroizing::new(k_transport_raw);
 
     // 3. Decrypt payload
-    let cipher = Aes256SivAead::new_from_slice(&k_transport)
+    let cipher = Aes256SivAead::new_from_slice(k_transport.as_slice())
         .map_err(|_| anyhow::anyhow!("Failed to initialize AES-SIV"))?;
     
-    let wrapped_payload = hex::decode(payload_hex).context("Invalid payload hex")?;
+    // Constant-time hex decoding for potentially sensitive payload
+    let wrapped_payload = Hex::decode_to_vec(payload_hex, None)
+        .map_err(|_| anyhow::anyhow!("Invalid payload hex"))?;
+
     let cipher_payload = Payload {
         msg: &wrapped_payload,
         aad: server_nonce,
     };
-    let dek = cipher.decrypt(client_nonce.into(), cipher_payload)
+    let dek_vec = cipher.decrypt(client_nonce.into(), cipher_payload)
         .map_err(|_| anyhow::anyhow!("Decryption failed - possibly invalid nonce or tampered payload"))?;
+    let dek = Zeroizing::new(dek_vec);
 
     if dek.len() != 32 {
         anyhow::bail!("Decrypted DEK has invalid length: {} (expected 32)", dek.len());
     }
 
     let mut dek_array = [0u8; 32];
-    dek_array.copy_from_slice(dek.as_slice());    
+    dek_array.copy_from_slice(dek.as_slice());
+    
     Ok(dek_array)
 }
 
@@ -116,10 +126,10 @@ mod tests {
         let yk_sign_pub = PublicKey::from(yk_sign_priv.verifying_key());
 
         println!("--- MOCK YUBIKEY KEYS ---");
-        println!("ECDH PRIV: {}", hex::encode(yk_ecdh_priv.to_bytes()));
-        println!("ECDH PUB:  {}", hex::encode(yk_ecdh_pub.to_encoded_point(false).as_bytes()));
-        println!("SIGN PRIV: {}", hex::encode(yk_sign_priv.to_bytes()));
-        println!("SIGN PUB:  {}", hex::encode(yk_sign_pub.to_encoded_point(false).as_bytes()));
+        println!("ECDH PRIV: {}", Hex::encode_to_string(yk_ecdh_priv.to_bytes()).unwrap());
+        println!("ECDH PUB:  {}", Hex::encode_to_string(yk_ecdh_pub.to_encoded_point(false).as_bytes()).unwrap());
+        println!("SIGN PRIV: {}", Hex::encode_to_string(yk_sign_priv.to_bytes()).unwrap());
+        println!("SIGN PUB:  {}", Hex::encode_to_string(yk_sign_pub.to_encoded_point(false).as_bytes()).unwrap());
         println!("-------------------------");
 
         let s_priv = SecretKey::random(&mut OsRng);
@@ -162,7 +172,7 @@ mod tests {
             &yk_ecdh_pub,
             &server_nonce,
             &client_nonce,
-            &hex::encode(payload_enc)
+            &Hex::encode_to_string(payload_enc).unwrap()
         ).expect("Phase D failed");
 
         assert_eq!(recovered_dek, setup_output.dek);
@@ -187,7 +197,7 @@ mod tests {
         let payload_enc = cipher.encrypt((&client_nonce).into(), Payload { msg: &[7u8; 32], aad: &server_nonce_correct }).unwrap();
 
         // Attempt D with wrong server nonce
-        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce_wrong, &client_nonce, &hex::encode(payload_enc));
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce_wrong, &client_nonce, &Hex::encode_to_string(payload_enc).unwrap());
         assert!(result.is_err());
     }
 
@@ -212,7 +222,7 @@ mod tests {
         let payload_enc = cipher.encrypt((&client_nonce_correct).into(), Payload { msg: &[7u8; 32], aad: &server_nonce }).unwrap();
 
         // Attempt D with wrong client nonce
-        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce_wrong, &hex::encode(payload_enc));
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce_wrong, &Hex::encode_to_string(payload_enc).unwrap());
         assert!(result.is_err());
     }
 
@@ -235,7 +245,7 @@ mod tests {
         // Tamper
         payload_enc[0] ^= 0xFF;
 
-        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce, &hex::encode(payload_enc));
+        let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce, &Hex::encode_to_string(payload_enc).unwrap());
         assert!(result.is_err());
     }
 
@@ -256,7 +266,7 @@ mod tests {
         let cipher = Aes256SivAead::new_from_slice(&k_transport).unwrap();
         let payload_enc = cipher.encrypt((&client_nonce).into(), Payload { msg: &[7u8; 32], aad: &server_nonce }).unwrap();
 
-        let result = run_phase_d(&s_priv_wrong, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce, &hex::encode(payload_enc));
+        let result = run_phase_d(&s_priv_wrong, &yk_ecdh_priv.public_key(), &server_nonce, &client_nonce, &Hex::encode_to_string(payload_enc).unwrap());
         assert!(result.is_err());
     }
 
@@ -290,5 +300,14 @@ mod tests {
         // Payload too short for AES-SIV (must be at least 16 bytes for S2V tag)
         let result = run_phase_d(&s_priv, &yk_ecdh_priv.public_key(), &nonce, &nonce, "aabbcc");
         assert!(result.is_err());
+    }
+
+    /// Placeholder test for hardware signature verification (future implementation).
+    #[test]
+    #[ignore = "Hardware signature verification is not yet implemented"]
+    fn test_phase_d_invalid_signature() {
+        // This is a placeholder for when Phase C/D includes a hardware signature
+        // as described in DESIGN.md.
+        assert!(false, "Signature verification not implemented");
     }
 }

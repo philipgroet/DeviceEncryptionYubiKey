@@ -8,6 +8,7 @@ use serde_json::json;
 use p256::SecretKey;
 use rand::{rngs::OsRng, RngCore};
 use p256::elliptic_curve::sec1::{ToEncodedPoint, FromEncodedPoint};
+use ct_codecs::{Hex, Decoder, Encoder};
 
 #[derive(Parser)]
 #[command(name = "deyk-server")]
@@ -93,8 +94,8 @@ fn main() -> Result<()> {
                 println!("Generating server keypair...");
                 let sk = SecretKey::random(&mut OsRng);
                 let pk = sk.public_key();
-                json_state.k_s_priv = Some(hex::encode(sk.to_bytes()));
-                json_state.k_s_pub = Some(hex::encode(pk.to_encoded_point(true).as_bytes()));
+                json_state.k_s_priv = Some(Hex::encode_to_string(sk.to_bytes()).unwrap());
+                json_state.k_s_pub = Some(Hex::encode_to_string(pk.to_encoded_point(true).as_bytes()).unwrap());
             }
 
             // Confirmation if overwriting existing DEK/c_yk
@@ -112,7 +113,7 @@ fn main() -> Result<()> {
             }
 
             // Load for crypto logic
-            let yk_pub_bytes = hex::decode(yk_pub_hex)?;
+            let yk_pub_bytes = Hex::decode_to_vec(yk_pub_hex, None).map_err(|_| anyhow::anyhow!("Invalid YubiKey public key hex"))?;
             let yk_pub_point = p256::EncodedPoint::from_bytes(&yk_pub_bytes).map_err(|_| anyhow::anyhow!("Invalid YubiKey public key"))?;
             let k_yk_ecdh_pub = p256::PublicKey::from_encoded_point(&yk_pub_point).into_option().context("Invalid YubiKey public key point")?;
 
@@ -120,15 +121,15 @@ fn main() -> Result<()> {
             let output = crypto::generate_c_yk(&k_yk_ecdh_pub)?;
 
             // Update JSON state for persistence
-            json_state.c_yk = Some(hex::encode(&output.c_yk));
-            json_state.k_e_pub = Some(hex::encode(output.k_e_pub.as_bytes()));
+            json_state.c_yk = Some(Hex::encode_to_string(&output.c_yk).unwrap());
+            json_state.k_e_pub = Some(Hex::encode_to_string(output.k_e_pub.as_bytes()).unwrap());
             
             // Save final state
             json_state.save(&config).context("Failed to save configuration")?;
 
             let result = json!({
                 "status": "success",
-                "plaintext_dek": hex::encode(output.dek),
+                "plaintext_dek": Hex::encode_to_string(output.dek).unwrap(),
                 "c_yk": json_state.c_yk,
                 "k_e_pub": json_state.k_e_pub,
                 "config_file": config,
@@ -146,9 +147,9 @@ fn main() -> Result<()> {
 
             // Now parse the full state for logic
             let state = ServerState::parse(json_state)?;
-            let server_nonce_bytes = hex::decode(server_nonce_hex)?;
+            let server_nonce_bytes = Hex::decode_to_vec(&server_nonce_hex, None).map_err(|_| anyhow::anyhow!("Invalid server nonce hex"))?;
 
-            let client_nonce_bytes = hex::decode(client_nonce)?;
+            let client_nonce_bytes = Hex::decode_to_vec(&client_nonce, None).map_err(|_| anyhow::anyhow!("Invalid client nonce hex"))?;
 
             let dek = crypto::run_phase_d(
                 &state.k_s_priv,
@@ -160,7 +161,7 @@ fn main() -> Result<()> {
 
             let result = json!({
                 "status": "success",
-                "dek": hex::encode(dek)
+                "dek": Hex::encode_to_string(dek).unwrap()
             });
 
             println!("{}", serde_json::to_string_pretty(&result)?);
@@ -171,7 +172,7 @@ fn main() -> Result<()> {
             // Generate a secure 16-byte nonce
             let mut nonce_bytes = [0u8; 16];
             rand::thread_rng().fill_bytes(&mut nonce_bytes);
-            let nonce_hex = hex::encode(nonce_bytes);
+            let nonce_hex = Hex::encode_to_string(nonce_bytes).unwrap();
 
             // Update and save
             json_state.server_nonce = Some(nonce_hex.clone());

@@ -5,6 +5,8 @@ use sha2::Sha256;
 use aes_siv::{aead::{Aead, KeyInit, Payload}, Aes256SivAead};
 use crate::yubikey::YubiKeyToken;
 use rand::{RngCore};
+use zeroize::{Zeroize, Zeroizing};
+use ct_codecs::{Hex, Decoder, Encoder};
 
 pub fn unwrap_dek(
     token: &mut dyn YubiKeyToken,
@@ -12,28 +14,31 @@ pub fn unwrap_dek(
     k_e_pub: &PublicKey,
 ) -> Result<[u8; 32]> {
     // 1. Hardware ECDH
-    let shared_secret = token.compute_ecdh(k_e_pub)?;
+    let shared_secret = Zeroizing::new(token.compute_ecdh(k_e_pub)?);
 
     // 2. Derive wrapping key via HKDF
     let hk = Hkdf::<Sha256>::new(None, &shared_secret);
-    let mut k_offline = [0u8; 64]; // Aes256SivAead needs 64 bytes
-    hk.expand(b"offline-wrapping-key", &mut k_offline)
+    let mut k_offline_raw = [0u8; 64]; // Aes256SivAead needs 64 bytes
+    hk.expand(b"offline-wrapping-key", &mut k_offline_raw)
         .map_err(|_| anyhow::anyhow!("HKDF expansion failed"))?;
+    let k_offline = Zeroizing::new(k_offline_raw);
 
     // 3. Decrypt C_YK
-    let cipher = Aes256SivAead::new_from_slice(&k_offline)
+    let cipher = Aes256SivAead::new_from_slice(k_offline.as_slice())
         .map_err(|_| anyhow::anyhow!("Failed to initialize AES-SIV"))?;
     
     let nonce = [0u8; 16]; // Static nonce for Phase A offline protection
-    let dek_bytes = cipher.decrypt(nonce.as_slice().into(), c_yk)
+    let dek_vec = cipher.decrypt(nonce.as_slice().into(), c_yk)
         .map_err(|_| anyhow::anyhow!("DEK decryption failed. Incorrect YubiKey or tampered payload?"))?;
+    let dek_buf = Zeroizing::new(dek_vec);
 
-    if dek_bytes.len() != 32 {
-        anyhow::bail!("Decrypted DEK has invalid length: {} (expected 32)", dek_bytes.len());
+    if dek_buf.len() != 32 {
+        anyhow::bail!("Decrypted DEK has invalid length: {} (expected 32)", dek_buf.len());
     }
 
     let mut dek = [0u8; 32];
-    dek.copy_from_slice(&dek_bytes);
+    dek.copy_from_slice(&dek_buf);
+
     Ok(dek)
 }
 
@@ -48,18 +53,21 @@ pub fn wrap_transport(
     }
 
     // 1. Compute transport shared secret
-    let shared_secret = token.compute_ecdh(k_s_pub)?;
+    let shared_secret = Zeroizing::new(token.compute_ecdh(k_s_pub)?);
 
     // Generate a secure 16-byte nonce
     let mut client_nonce_bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut client_nonce_bytes);
-    let client_nonce_hex = hex::encode(client_nonce_bytes);
+    
+    // Use constant-time encoding for consistency
+    let client_nonce_hex = Hex::encode_to_string(client_nonce_bytes).unwrap();
 
     // 2. Derive transport wrapping key via HKDF
     let hk = Hkdf::<Sha256>::new(Some(client_nonce_bytes.as_slice()), &shared_secret);
-    let mut k_transport = [0u8; 64];
-    hk.expand(b"transport-wrapping-key", &mut k_transport)
+    let mut k_transport_raw = [0u8; 64];
+    hk.expand(b"transport-wrapping-key", &mut k_transport_raw)
         .map_err(|_| anyhow::anyhow!("HKDF expansion failed"))?;
+    let k_transport = Zeroizing::new(k_transport_raw);
 
     let unwrapped_payload = Payload {
         msg: dek,
@@ -67,7 +75,7 @@ pub fn wrap_transport(
     };
 
     // 5. Encrypt using AES-SIV
-    let cipher = Aes256SivAead::new_from_slice(&k_transport)
+    let cipher = Aes256SivAead::new_from_slice(k_transport.as_slice())
         .map_err(|_| anyhow::anyhow!("Failed to initialize AES-SIV"))?;
     
     // AES-SIV with Nonce as AAD
@@ -136,7 +144,7 @@ mod tests {
 
         // --- Execute Phase C ---
         let (payload_enc, client_nonce_hex) = wrap_transport(&mut mock_token, &dek, &k_s_pub, &server_nonce).expect("Wrap should succeed");
-        let client_nonce_bytes = hex::decode(client_nonce_hex).unwrap();
+        let client_nonce_bytes = Hex::decode_to_vec(&client_nonce_hex, None).unwrap();
 
         // --- Verify (Simulating Server-Side Phase D) ---
         let shared_secret_transport = p256::ecdh::diffie_hellman(s_priv.to_nonzero_scalar(), mock_token.ecdh_priv.public_key().as_affine());
